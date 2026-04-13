@@ -1,503 +1,312 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    MyToolkit Installer - Bootstrap script for first-time installation.
+    MyToolkit Installer
 
 .DESCRIPTION
-    This public installer script prompts the user for their issued GitHub
-    Personal Access Token (PAT), validates it against the private MyToolkit
-    repository and the Gist licence list, then downloads and installs the
-    full toolkit to a chosen local folder.
-
-    The PAT is stored securely in Windows Credential Manager after install.
-    This installer script deletes itself from temp after completion.
-
-.NOTES
-    This script lives in a PUBLIC GitHub repo.
-    The MyToolkit tool files live in a PRIVATE GitHub repo.
-    Access is controlled by issuing PATs per user.
+    Downloads MyToolkit.ps1 and VERSION directly to C:\temp\MyToolkit.
+    No subfolders, no temp staging. Two files, two direct downloads.
+    Tools are fetched on demand at runtime -- nothing else is installed.
 
 .EXAMPLE
-    Run this one-liner in PowerShell to install MyToolkit :
     irm "https://raw.githubusercontent.com/TheEscPilot/MyToolkit-Installer/main/install.ps1" | iex
 #>
 
 Set-StrictMode -Version Latest
-# FIX #6 : Scoped to Continue globally; individual calls use -ErrorAction Stop where needed.
-# This prevents minor non-fatal operations from aborting the whole script unexpectedly.
 $ErrorActionPreference = "Continue"
 
-# ============================================================
-# INSTALLER CONFIGURATION
-# Edit these values to match your private repo details.
-# ============================================================
-$Script:GitHubUser    = "TheEscPilot"
-$Script:GitHubRepo    = "MyToolkit"
-$Script:GitHubBranch  = "main"
-$Script:GistURL       = "https://gist.githubusercontent.com/TheEscPilot/7e7d0a0131af06c88b306f80da8254c7/raw/licence.json"
-$Script:CredTarget    = "MyToolkit_GitHub_PAT"
-$Script:DefaultInstall= "$env:USERPROFILE\MyToolkit"
+# ── Configuration ─────────────────────────────────────────────────────────────
+$Script:GitHubUser     = "TheEscPilot"
+$Script:GitHubRepo     = "MyToolkit"
+$Script:GitHubBranch   = "main"
+$Script:GistURL        = "https://gist.githubusercontent.com/TheEscPilot/7e7d0a0131af06c88b306f80da8254c7/raw/licence.json"
+$Script:CredTarget     = "MyToolkit_GitHub_PAT"
+$Script:DefaultInstall = "C:\temp\MyToolkit"
+$Script:RawBase        = "https://raw.githubusercontent.com/$Script:GitHubUser/$Script:GitHubRepo/$Script:GitHubBranch"
 
-# Files to download from the private repo (relative paths)
+# ONLY these two files are downloaded. Everything else streams at runtime.
 $Script:FilesToDownload = @(
-    "MyToolkit.ps1",
-    "VERSION",
-    "Tools/tools.manifest.json",
-    "Tools/UserManagement/Get-LocalUserReport.ps1",
-    "Tools/UserManagement/Reset-LocalUserPassword.ps1",
-    "Tools/SystemHealth/Get-SystemSnapshot.ps1",
-    "Tools/SystemHealth/Get-DiskHealthReport.ps1",
-    "Tools/Network/Test-Connectivity.ps1",
-    "Tools/Network/Get-NetworkConfig.ps1",
-    "Tools/FileDisk/Clear-TempFiles.ps1",
-    "Tools/FileDisk/Get-LargeFiles.ps1",
-    "Tools/Security/Get-InstalledSoftware.ps1",
-    "Tools/Security/Test-OpenPorts.ps1",
-    "Tools/Services/Get-RunningServices.ps1",
-    "Tools/Services/Restart-ServiceHelper.ps1",
-    "Tools/CyberSecurity/Get-DefenderStatus.ps1",
-    "Tools/CyberSecurity/Get-StartupItems.ps1"
+    @{ Remote = "MyToolkit.ps1"; Local = "MyToolkit.ps1" },
+    @{ Remote = "VERSION";       Local = "VERSION"       }
 )
 
-# ============================================================
-# COLOUR HELPERS
-# FIX #1 : Script saved as UTF-8 with BOM; box-drawing characters
-#           are now correctly encoded for PowerShell 5.1.
-# ============================================================
+# ── Display helpers ───────────────────────────────────────────────────────────
 function Write-Banner {
     Clear-Host
     Write-Host ""
     Write-Host "  +------------------------------------------------------+" -ForegroundColor Cyan
-    Write-Host "  |   MyToolkit - Installer                              |" -ForegroundColor Cyan
-    Write-Host "  |   Secure bootstrap for first-time setup             |" -ForegroundColor Cyan
+    Write-Host "  |   MyToolkit -- Installer                             |" -ForegroundColor Cyan
+    Write-Host "  |   Secure bootstrap -- tools stream from GitHub       |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host ""
 }
+function Write-Step { param([string]$T) Write-Host "  * $T" -ForegroundColor White }
+function Write-OK   { param([string]$T) Write-Host "  [ OK ] $T" -ForegroundColor Green }
+function Write-Fail { param([string]$T) Write-Host "  [FAIL] $T" -ForegroundColor Red }
+function Write-Warn { param([string]$T) Write-Host "  [ !! ] $T" -ForegroundColor DarkYellow }
 
-function Write-Step {
-    param([string]$Text)
-    Write-Host "  * $Text" -ForegroundColor White
-}
-
-function Write-OK {
-    param([string]$Text)
-    Write-Host "  [ OK ] $Text" -ForegroundColor Green
-}
-
-function Write-Fail {
-    param([string]$Text)
-    Write-Host "  [FAIL] $Text" -ForegroundColor Red
-}
-
-function Write-Warn {
-    param([string]$Text)
-    Write-Host "  [ !! ] $Text" -ForegroundColor DarkYellow
-}
-
-# ============================================================
-# FUNCTION : ConvertFrom-SecureStringPlain
-# Converts a SecureString to plain text (held in memory only).
-# ============================================================
+# ── ConvertFrom-SecureStringPlain ─────────────────────────────────────────────
 function ConvertFrom-SecureStringPlain {
-    param([System.Security.SecureString]$SecureString)
-    $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
-    try {
-        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-    }
-    finally {
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-    }
+    param([System.Security.SecureString]$S)
+    $p = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($S)
+    try   { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($p) }
+    finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($p) }
 }
 
-# ============================================================
-# FUNCTION : Save-ToCredentialManager
-# Stores the PAT in Windows Credential Manager via direct API
-# call (CredWrite) to avoid exposing the token as a process
-# command-line argument, which is visible to all local processes.
-# FIX #3 : Replaced cmdkey /pass:<token> with P/Invoke CredWrite.
-# ============================================================
+# ── Save-ToCredentialManager ──────────────────────────────────────────────────
 function Save-ToCredentialManager {
     param([string]$PlainToken)
-
-    # Load the native CredWrite signature only once per session
     if (-not ([System.Management.Automation.PSTypeName]'CredManager.NativeMethods').Type) {
-        $signature = @'
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        Add-Type -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]
 public struct CREDENTIAL {
-    public uint   Flags;
-    public uint   Type;
-    public string TargetName;
-    public string Comment;
-    public long   LastWritten;
-    public uint   CredentialBlobSize;
-    public IntPtr CredentialBlob;
-    public uint   Persist;
-    public uint   AttributeCount;
-    public IntPtr Attributes;
-    public string TargetAlias;
-    public string UserName;
-}
-
-[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-public static extern bool CredWrite([In] ref CREDENTIAL userCredential, [In] uint flags);
-'@
-        Add-Type -MemberDefinition $signature -Namespace "CredManager" -Name "NativeMethods" -ErrorAction Stop
+    public uint Flags,Type; public string TargetName,Comment;
+    public long LastWritten; public uint CredentialBlobSize;
+    public IntPtr CredentialBlob; public uint Persist,AttributeCount;
+    public IntPtr Attributes; public string TargetAlias,UserName; }
+[DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)]
+public static extern bool CredWrite([In] ref CREDENTIAL c,[In] uint f);
+'@ -Namespace "CredManager" -Name "NativeMethods" -ErrorAction Stop
     }
-
-    # Encode token as UTF-16 LE bytes (native Windows credential format)
-    $credBlob    = [System.Text.Encoding]::Unicode.GetBytes($PlainToken)
-    $credBlobPtr = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($credBlob.Length)
-
+    $blob    = [System.Text.Encoding]::Unicode.GetBytes($PlainToken)
+    $ptr     = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($blob.Length)
     try {
-        [System.Runtime.InteropServices.Marshal]::Copy($credBlob, 0, $credBlobPtr, $credBlob.Length)
-
-        $cred                    = New-Object CredManager.NativeMethods+CREDENTIAL
-        $cred.Type               = 1   # CRED_TYPE_GENERIC
-        $cred.TargetName         = $Script:CredTarget
-        $cred.UserName           = "MyToolkit"
-        $cred.CredentialBlob     = $credBlobPtr
-        $cred.CredentialBlobSize = [uint32]$credBlob.Length
-        $cred.Persist            = 2   # CRED_PERSIST_LOCAL_MACHINE
-
-        $ok = [CredManager.NativeMethods]::CredWrite([ref]$cred, 0)
-
-        if ($ok) {
+        [System.Runtime.InteropServices.Marshal]::Copy($blob, 0, $ptr, $blob.Length)
+        $c = New-Object CredManager.NativeMethods+CREDENTIAL
+        $c.Type = 1; $c.TargetName = $Script:CredTarget; $c.UserName = "MyToolkit"
+        $c.CredentialBlob = $ptr; $c.CredentialBlobSize = [uint32]$blob.Length; $c.Persist = 2
+        if ([CredManager.NativeMethods]::CredWrite([ref]$c, 0)) {
             Write-OK "PAT stored in Windows Credential Manager."
             return $true
-        } else {
-            $errCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            Write-Warn "Could not store PAT in Credential Manager (Win32 error $errCode)."
+        }
+        Write-Warn "Could not store PAT (Win32 error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))."
+        return $false
+    } finally {
+        if ($ptr -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }
+        [Array]::Clear($blob, 0, $blob.Length)
+    }
+}
+
+# ── Test-GitHubAccess ─────────────────────────────────────────────────────────
+function Test-GitHubAccess {
+    param([string]$Token)
+    try {
+        $r = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/$Script:GitHubUser/$Script:GitHubRepo" `
+            -Headers @{ Authorization = "token $Token" } `
+            -TimeoutSec 10 -ErrorAction Stop
+        return ($null -ne $r.name)
+    } catch { return $false }
+}
+
+# ── Test-GistLicence ──────────────────────────────────────────────────────────
+function Test-GistLicence {
+    param([string]$Token)
+    $suffix = $Token.Substring([Math]::Max(0, $Token.Length - 8))
+    try {
+        $r = Invoke-RestMethod -Uri $Script:GistURL -TimeoutSec 10 -ErrorAction Stop
+        if ($null -eq $r.active) {
+            Write-Warn "Licence server format unexpected. Grace mode."
+            return @{ Valid = $true; Message = "" }
+        }
+        if ($r.active -contains $suffix) { return @{ Valid = $true; Message = "" } }
+        $msg = if ($r.message) { $r.message } else { "Token not in active licence list." }
+        return @{ Valid = $false; Message = $msg }
+    } catch {
+        Write-Warn "Licence server unreachable. Grace mode."
+        return @{ Valid = $true; Message = "" }
+    }
+}
+
+# ── Get-InstallPath ───────────────────────────────────────────────────────────
+function Get-InstallPath {
+    Write-Host ""
+    Write-Host "  Install location (Enter for default) :" -ForegroundColor White
+    Write-Host "  Default : $Script:DefaultInstall" -ForegroundColor DarkGray
+    Write-Host ""
+    $p = (Read-Host "  Path").Trim()
+    if ($p -eq "") { return $Script:DefaultInstall } else { return $p }
+}
+
+# ── Invoke-DownloadFiles ──────────────────────────────────────────────────────
+# Downloads each file DIRECTLY to its final destination inside $InstallPath.
+# No temp folders. No subfolder extraction. No relative path math.
+# Each file = one Invoke-WebRequest straight to Join-Path $InstallPath $file.Local
+# ─────────────────────────────────────────────────────────────────────────────
+function Invoke-DownloadFiles {
+    param([string]$Token, [string]$InstallPath)
+
+    $headers = @{ Authorization = "token $Token" }
+
+    # Create the install folder if needed
+    if (-not (Test-Path $InstallPath)) {
+        try {
+            $null = New-Item -ItemType Directory -Path $InstallPath -Force -ErrorAction Stop
+            Write-OK "Created : $InstallPath"
+        } catch {
+            Write-Fail "Could not create install folder: $_"
             return $false
         }
     }
-    finally {
-        # Zero and free the unmanaged blob regardless of outcome
-        if ($credBlobPtr -ne [IntPtr]::Zero) {
-            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($credBlobPtr)
-        }
-        # Zero the managed byte array
-        [Array]::Clear($credBlob, 0, $credBlob.Length)
-    }
-}
-
-# ============================================================
-# FUNCTION : Test-GitHubAccess
-# Validates the PAT against the private repo.
-# ============================================================
-function Test-GitHubAccess {
-    param([string]$Token)
-
-    try {
-        $headers  = @{ Authorization = "token $Token" }
-        $apiUrl   = "https://api.github.com/repos/$Script:GitHubUser/$Script:GitHubRepo"
-        $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -TimeoutSec 10 -ErrorAction Stop
-
-        if ($response.name) {
-            return $true
-        }
-        return $false
-    }
-    catch {
-        return $false
-    }
-}
-
-# ============================================================
-# FUNCTION : Test-GistLicence
-# Checks the Gist licence list for the token suffix.
-# FIX #4 : Validates JSON structure before use; avoids silent
-#           false-negative when the Gist format is unexpected.
-# ============================================================
-function Test-GistLicence {
-    param([string]$Token)
-
-    $suffix = $Token.Substring([Math]::Max(0, $Token.Length - 8))
-
-    try {
-        $response = Invoke-RestMethod -Uri $Script:GistURL -TimeoutSec 10 -ErrorAction Stop
-
-        # Validate expected structure before trusting the response
-        if ($null -eq $response.active) {
-            Write-Warn "Licence server returned an unexpected format. Proceeding in grace mode."
-            return @{ Valid = $true; Message = "malformed-response" }
-        }
-
-        $activeList = $response.active
-
-        if ($activeList -contains $suffix) {
-            return @{ Valid = $true; Message = "" }
-        } else {
-            $msg = if ($null -ne $response.message) { $response.message } else { "Token suffix not found in active licence list." }
-            return @{ Valid = $false; Message = $msg }
-        }
-    }
-    catch {
-        # Gist unreachable - allow install to proceed (grace mode)
-        Write-Warn "Licence server unreachable. Proceeding in grace mode."
-        return @{ Valid = $true; Message = "offline" }
-    }
-}
-
-# ============================================================
-# FUNCTION : Get-InstallPath
-# Prompts the user for an installation folder.
-# ============================================================
-function Get-InstallPath {
-    Write-Host ""
-    Write-Host "  Install location (press Enter for default) :" -ForegroundColor White
-    Write-Host "  Default : $Script:DefaultInstall" -ForegroundColor DarkGray
-    Write-Host ""
-    $userPath = Read-Host "  Path"
-
-    if ($userPath.Trim() -eq "") {
-        return $Script:DefaultInstall
-    }
-    return $userPath.Trim()
-}
-
-# ============================================================
-# FUNCTION : Invoke-DownloadFiles
-# Downloads all toolkit files from the private repo.
-# FIX #5 : Progress percentage now reflects completed downloads,
-#           not downloads in progress (increment moved after download).
-# FIX #7 : Relative path extraction uses a normalised base path
-#           to avoid TrimStart edge cases on PS 5.1 (.NET 4.x).
-# ============================================================
-function Invoke-DownloadFiles {
-    param(
-        [string]$Token,
-        [string]$InstallPath
-    )
-
-    $headers  = @{ Authorization = "token $Token" }
-    $tempBase = "$env:TEMP\MyToolkit_Install_$(Get-Random)"
-    $null = New-Item -ItemType Directory -Path $tempBase -Force
-
-    $baseURL  = "https://raw.githubusercontent.com/$Script:GitHubUser/$Script:GitHubRepo/$Script:GitHubBranch"
-    $total    = $Script:FilesToDownload.Count
-    $current  = 0
-    $failed   = @()
-
-    # FIX #7 : Normalise base path with trailing separator once, up front.
-    $tempBaseNorm = $tempBase.TrimEnd('\') + '\'
 
     Write-Host ""
-    Write-Step "Downloading $total files from private repo..."
+    Write-Step "Downloading $($Script:FilesToDownload.Count) file(s) to $InstallPath"
     Write-Host ""
 
+    $allOK = $true
     foreach ($file in $Script:FilesToDownload) {
-        # FIX #5 : Show percentage for files already completed, not the one starting now.
-        $pct = [int](($current / $total) * 100)
-        Write-Progress -Activity "Downloading MyToolkit" -Status "$file" -PercentComplete $pct
+        # Final destination is directly inside $InstallPath -- no subfolders
+        $dest    = Join-Path $InstallPath $file.Local
+        $url     = "$Script:RawBase/$($file.Remote)"
 
-        $fileURL    = "$baseURL/$($file -replace '\\', '/')"
-        $tempTarget = Join-Path $tempBase ($file -replace '/', '\')
-        $tempDir    = Split-Path $tempTarget -Parent
-
-        if (-not (Test-Path $tempDir)) {
-            $null = New-Item -ItemType Directory -Path $tempDir -Force
-        }
-
+        Write-Host "  Downloading $($file.Remote)..." -NoNewline -ForegroundColor DarkGray
         try {
-            Invoke-WebRequest -Uri $fileURL -Headers $headers -OutFile $tempTarget -ErrorAction Stop
-
-            if (-not (Test-Path $tempTarget) -or (Get-Item $tempTarget).Length -eq 0) {
-                throw "Empty file received."
+            Invoke-WebRequest -Uri $url -Headers $headers -OutFile $dest -ErrorAction Stop
+            if (-not (Test-Path $dest) -or (Get-Item $dest).Length -eq 0) {
+                throw "File missing or empty after download."
             }
+            Write-Host "  OK" -ForegroundColor Green
+        } catch {
+            Write-Host "  FAILED: $_" -ForegroundColor Red
+            $allOK = $false
         }
-        catch {
-            $failed += $file
-            Write-Warn "Failed to download : $file ($_)"
-        }
-
-        # Increment AFTER download so 100% only shows when all files are done
-        $current++
     }
 
-    Write-Progress -Activity "Downloading MyToolkit" -Completed
+    # Create Reports folder alongside the install
+    $reportsPath = Join-Path $InstallPath "Reports"
+    if (-not (Test-Path $reportsPath)) {
+        $null = New-Item -ItemType Directory -Path $reportsPath -Force -ErrorAction SilentlyContinue
+        Write-OK "Created reports folder : $reportsPath"
+    }
 
-    if ($failed.Count -gt 0) {
-        Write-Warn "$($failed.Count) file(s) failed to download. Install may be incomplete."
+    if ($allOK) {
+        Write-Host ""
+        Write-OK "Download complete. Files in : $InstallPath"
+        Write-OK "Reports folder  : $reportsPath"
     } else {
-        Write-OK "All files downloaded successfully."
+        Write-Warn "One or more files failed. MyToolkit may not launch correctly."
     }
-
-    # Move from temp staging to install path
-    Write-Step "Installing to : $InstallPath"
-
-    if (-not (Test-Path $InstallPath)) {
-        $null = New-Item -ItemType Directory -Path $InstallPath -Force
-    }
-
-    # FIX #7 : Use normalised base path for clean relative-path extraction.
-    Get-ChildItem -Path $tempBase -Recurse | ForEach-Object {
-        $relativePath = $_.FullName.Substring($tempBaseNorm.Length)
-        $destination  = Join-Path $InstallPath $relativePath
-
-        if ($_.PSIsContainer) {
-            $null = New-Item -ItemType Directory -Path $destination -Force -ErrorAction SilentlyContinue
-        } else {
-            $destDir = Split-Path $destination -Parent
-            if (-not (Test-Path $destDir)) {
-                $null = New-Item -ItemType Directory -Path $destDir -Force
-            }
-            Copy-Item -Path $_.FullName -Destination $destination -Force
-        }
-    }
-
-    # Clean up staging area
-    Remove-Item -Path $tempBase -Recurse -Force -ErrorAction SilentlyContinue
-    Write-OK "Installation complete."
-
-    return ($failed.Count -eq 0)
+    return $allOK
 }
 
-# ============================================================
-# FUNCTION : Invoke-SelfDestruct
-# Removes this installer script from temp after completion.
-# FIX #2 : Also removes the irm|iex command from the persistent
-#           PSReadLine history file on disk, not just in-session history.
-# ============================================================
+# ── Start-MyToolkit ───────────────────────────────────────────────────────────
+# Uses Start-Process with an explicit, verified path.
+# This works correctly when called from irm|iex context.
+# ─────────────────────────────────────────────────────────────────────────────
+function Start-MyToolkit {
+    param([string]$InstallPath)
+    $scriptPath = Join-Path $InstallPath "MyToolkit.ps1"
+    if (-not (Test-Path $scriptPath)) {
+        Write-Fail "MyToolkit.ps1 not found at : $scriptPath"
+        Write-Host "  Run it manually: powershell -File `"$scriptPath`"" -ForegroundColor DarkGray
+        return
+    }
+    Write-Step "Launching MyToolkit..."
+    Start-Process -FilePath "powershell.exe" `
+                  -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$scriptPath`"") `
+                  -ErrorAction Stop
+}
+
+# ── Invoke-SelfDestruct ───────────────────────────────────────────────────────
 function Invoke-SelfDestruct {
-    # Remove temp installer artifact if present
-    $tempInstaller = "$env:TEMP\install.ps1"
-    if (Test-Path $tempInstaller) {
-        Remove-Item -Path $tempInstaller -Force -ErrorAction SilentlyContinue
+    @("$env:TEMP\install.ps1","$env:TEMP\mytoolkit_install.ps1") | ForEach-Object {
+        if (Test-Path $_) { Remove-Item $_ -Force -ErrorAction SilentlyContinue }
     }
-
-    # Clear in-session history
     Clear-History -ErrorAction SilentlyContinue
-
-    # FIX #2 : Clear the irm/iex entry from PSReadLine's persistent history file.
-    # Clear-History only affects the in-memory session list; PSReadLine writes a
-    # separate file that persists across sessions.
     try {
-        $psrlOption = Get-PSReadLineOption -ErrorAction SilentlyContinue
-        if ($psrlOption -and $psrlOption.HistorySavePath -and (Test-Path $psrlOption.HistorySavePath)) {
-            $historyPath    = $psrlOption.HistorySavePath
-            $filteredLines  = Get-Content $historyPath -ErrorAction SilentlyContinue |
-                              Where-Object { $_ -notmatch '(?i)(irm|iex|install\.ps1|mytoolkit-installer)' }
-            if ($null -ne $filteredLines) {
-                $filteredLines | Set-Content $historyPath -Encoding UTF8 -ErrorAction SilentlyContinue
-            }
+        $h = (Get-PSReadLineOption -ErrorAction SilentlyContinue).HistorySavePath
+        if ($h -and (Test-Path $h)) {
+            Get-Content $h -ErrorAction SilentlyContinue |
+                Where-Object { $_ -notmatch '(?i)(irm|iex|install\.ps1|mytoolkit-installer)' } |
+                Set-Content $h -Encoding UTF8 -ErrorAction SilentlyContinue
         }
-    }
-    catch {
-        # Non-fatal - best effort only
-    }
+    } catch {}
 }
 
-# ============================================================
-# MAIN - Installer entry point
-# FIX #6 : Main body wrapped in try/catch so unexpected errors
-#           surface a friendly message rather than a raw exception.
-# ============================================================
-
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 try {
 
 Write-Banner
 
 Write-Host "  This installer will :" -ForegroundColor White
 Write-Host "   1. Validate your MyToolkit access key" -ForegroundColor DarkGray
-Write-Host "   2. Download the toolkit from the private repository" -ForegroundColor DarkGray
-Write-Host "   3. Store your access key securely (Windows Credential Manager)" -ForegroundColor DarkGray
-Write-Host "   4. Launch MyToolkit" -ForegroundColor DarkGray
+Write-Host "   2. Download MyToolkit.ps1 to your chosen folder" -ForegroundColor DarkGray
+Write-Host "   3. Store your key securely in Windows Credential Manager" -ForegroundColor DarkGray
+Write-Host "   4. Launch MyToolkit (tools stream from GitHub at runtime)" -ForegroundColor DarkGray
 Write-Host ""
+Write-Host "  Default install path : $Script:DefaultInstall" -ForegroundColor DarkGray
 Write-Host "  ---------------------------------------------------------" -ForegroundColor DarkCyan
 Write-Host ""
 
-# ── Step 1 : Get and validate PAT — retry loop (max 3 attempts) ──────────────
-# FIX #8 : Replaced single-shot key entry with a retry loop.
-#           User gets 3 attempts before the installer exits cleanly.
-#           Each failure shows the specific reason rather than closing silently.
+# Step 1 : PAT entry -- retry up to 3 times
 $maxAttempts = 3
 $attempt     = 0
 $plainPAT    = $null
 
 while ($attempt -lt $maxAttempts) {
     $attempt++
-
     if ($attempt -gt 1) {
         Write-Host ""
-        Write-Warn "Attempt $attempt of $maxAttempts — please try again."
+        Write-Warn "Attempt $attempt of $maxAttempts"
         Write-Host ""
     }
 
     Write-Host "  Enter your MyToolkit access key :" -ForegroundColor White
-    Write-Host "  (Paste your full PAT — input is hidden)" -ForegroundColor DarkGray
+    Write-Host "  (Paste your full PAT -- input is hidden)" -ForegroundColor DarkGray
     Write-Host ""
 
-    $securePAT = Read-Host "  Access key" -AsSecureString
-    $plainPAT  = ConvertFrom-SecureStringPlain -SecureString $securePAT
+    $secure   = Read-Host "  Access key" -AsSecureString
+    $plainPAT = ConvertFrom-SecureStringPlain -S $secure
 
-    # Basic length check
     if ($plainPAT.Length -lt 10) {
-        Write-Fail "Access key is too short to be valid (minimum 10 characters)."
-        Write-Host "  Make sure you paste the full key, not just part of it." -ForegroundColor DarkGray
-        $plainPAT = $null
-        continue
+        Write-Fail "Key too short -- paste the full ghp_... string."
+        $plainPAT = $null; continue
     }
 
     Write-Host ""
-
-    # Validate against GitHub repo
-    Write-Step "Validating access key against repository..."
-    $repoAccess = Test-GitHubAccess -Token $plainPAT
-
-    if (-not $repoAccess) {
-        Write-Fail "Access key not recognised by GitHub (401 Unauthorised)."
-        Write-Host "  Common causes :" -ForegroundColor DarkGray
-        Write-Host "   - You entered only part of the key (paste the full ghp_... string)" -ForegroundColor DarkGray
-        Write-Host "   - The key has expired or been revoked" -ForegroundColor DarkGray
-        Write-Host "   - The key does not have Contents:Read on the MyToolkit repo" -ForegroundColor DarkGray
-        $plainPAT = $null
-        continue
+    Write-Step "Validating key against GitHub..."
+    if (-not (Test-GitHubAccess -Token $plainPAT)) {
+        Write-Fail "GitHub rejected the key (401 Unauthorised)."
+        Write-Host "  - Paste the full key, not just part of it" -ForegroundColor DarkGray
+        Write-Host "  - Key must have Contents:Read on the MyToolkit repo" -ForegroundColor DarkGray
+        Write-Host "  - Key may have expired or been revoked" -ForegroundColor DarkGray
+        $plainPAT = $null; continue
     }
     Write-OK "Repository access confirmed."
 
-    # Validate against Gist licence
-    Write-Step "Checking licence status..."
-    $licenceResult = Test-GistLicence -Token $plainPAT
-
-    if (-not $licenceResult.Valid) {
-        Write-Fail "Licence not active."
-        Write-Host "  $($licenceResult.Message)" -ForegroundColor DarkGray
-        Write-Host "  Contact your administrator to have your key activated." -ForegroundColor DarkGray
-        $plainPAT = $null
-        continue
+    Write-Step "Checking licence..."
+    $lic = Test-GistLicence -Token $plainPAT
+    if (-not $lic.Valid) {
+        Write-Fail "Licence not active: $($lic.Message)"
+        Write-Host "  Contact your administrator to activate your key." -ForegroundColor DarkGray
+        $plainPAT = $null; continue
     }
     Write-OK "Licence validated."
-
-    # Both checks passed — break out of retry loop
     break
 }
 
-# If all attempts exhausted without a valid key — pause then exit
 if (-not $plainPAT) {
     Write-Host ""
     Write-Fail "Maximum attempts reached. Installation cancelled."
-    Write-Host "  Contact your administrator to request a valid access key." -ForegroundColor DarkGray
     Write-Host ""
     Read-Host "  Press Enter to close"
     exit 1
 }
 
-# ── Step 2 : Choose install location ─────────────────────────────────────────
+# Step 2 : Install path
 $installPath = Get-InstallPath
 
-# ── Step 3 : Download and install ────────────────────────────────────────────
+# Step 3 : Download
 $success = Invoke-DownloadFiles -Token $plainPAT -InstallPath $installPath
 
-# ── Step 4 : Store PAT in Credential Manager ─────────────────────────────────
+# Step 4 : Store PAT
 Write-Host ""
 Write-Step "Storing access key securely..."
-$stored = Save-ToCredentialManager -PlainToken $plainPAT
-
-# Clear plain token from memory immediately after storage
+$null = Save-ToCredentialManager -PlainToken $plainPAT
 $plainPAT = $null
 [System.GC]::Collect()
 
-# ── Step 5 : Summary ─────────────────────────────────────────────────────────
+# Step 5 : Result
 Write-Host ""
 Write-Host "  ---------------------------------------------------------" -ForegroundColor DarkCyan
 Write-Host ""
@@ -505,26 +314,22 @@ Write-Host ""
 if ($success) {
     Write-OK "MyToolkit installed successfully."
     Write-Host ""
-    Write-Host "  To launch MyToolkit :" -ForegroundColor White
+    Write-Host "  To launch any time :" -ForegroundColor White
     Write-Host "  powershell -File `"$installPath\MyToolkit.ps1`"" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  Tip : Add the install folder to your PATH for quick access." -ForegroundColor DarkGray
     Write-Host ""
 
     $launch = Read-Host "  Launch MyToolkit now? [Y/N]"
     if ($launch -match "^[Yy]$") {
-        Write-Host ""
-        Write-Step "Launching MyToolkit..."
         Invoke-SelfDestruct
-        & powershell -NoProfile -File "$installPath\MyToolkit.ps1"
+        Start-MyToolkit -InstallPath $installPath
     } else {
         Write-Host ""
-        Write-Host "  Goodbye. Run MyToolkit.ps1 from your install folder when ready." -ForegroundColor DarkGray
+        Write-Host "  Goodbye. Run MyToolkit.ps1 from: $installPath" -ForegroundColor DarkGray
         Invoke-SelfDestruct
     }
 } else {
-    Write-Warn "Installation completed with some errors. Please check the output above."
-    Write-Host "  MyToolkit may still function. Run MyToolkit.ps1 from : $installPath" -ForegroundColor DarkGray
+    Write-Warn "Install completed with errors."
+    Write-Host "  Try launching manually: powershell -File `"$installPath\MyToolkit.ps1`"" -ForegroundColor DarkGray
     Write-Host ""
     Read-Host "  Press Enter to close"
     Invoke-SelfDestruct
@@ -532,14 +337,9 @@ if ($success) {
 
 Write-Host ""
 
-} # end try
-catch {
-    # FIX #8 : Catch block now pauses before closing so the error is readable.
+} catch {
     Write-Host ""
-    Write-Fail "An unexpected error stopped the installer :"
-    Write-Host "  $_" -ForegroundColor DarkYellow
-    Write-Host ""
-    Write-Host "  If this persists, contact your administrator." -ForegroundColor DarkGray
+    Write-Fail "Unexpected error: $_"
     Write-Host ""
     Read-Host "  Press Enter to close"
     exit 1
